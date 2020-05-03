@@ -387,14 +387,14 @@ class Trainer(BaseTrainer):
         # freespace loss
         p_freespace = get_freespace_loss_points(
             p, camera_mat, world_mat, scale_mat, self.use_cube_intersection,
-            self.depth_range)
+            self.depth_range)  # (B,N,3)
 
         depth_input = depth_img if (
             self.lambda_depth != 0 or self.depth_from_visual_hull) else None
         p_occupancy = get_occupancy_loss_points(
             p, camera_mat, world_mat, scale_mat, depth_input,
             self.use_cube_intersection, self.occupancy_random_normal,
-            self.depth_range)
+            self.depth_range)  # (B,N,3)
 
         # 2.) Initialize loss
         loss['loss'] = 0

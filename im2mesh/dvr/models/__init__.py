@@ -39,9 +39,8 @@ class DVR(nn.Module):
         self.call_depth_function = depth_function.DepthModule(
             **depth_function_kwargs)
 
-    def forward(self, pixels, p_occupancy, p_freespace, inputs, camera_mat,
-                world_mat, scale_mat, it=None,  sparse_depth=None,
-                calc_normals=False, **kwargs):
+    def forward(self, pixels, p_occupancy, p_freespace, inputs, cameras,
+                it=None,  sparse_depth=None, calc_normals=False, **kwargs):
         ''' Performs a forward pass through the network.
 
         This function evaluates the depth and RGB color values for respective
@@ -67,8 +66,7 @@ class DVR(nn.Module):
 
         # transform pixels p to world
         p_world, mask_pred, mask_zero_occupied = \
-            self.pixels_to_world(pixels, camera_mat,
-                                 world_mat, scale_mat, c, it)
+            self.pixels_to_world(pixels, cameras, c, it)
         rgb_pred = self.decode_color(p_world, c=c)
 
         # eval occ at sampled p
@@ -80,6 +78,7 @@ class DVR(nn.Module):
         logits_freespace = self.decode(p_freespace, c=c,).logits
 
         if calc_normals:
+            # detach because we don't care about dp/d(theta) anymore
             normals = self.get_normals(p_world.detach(), mask_pred, c=c)
         else:
             normals = None
@@ -91,7 +90,7 @@ class DVR(nn.Module):
             world_mat = sparse_depth['world_mat']
             scale_mat = sparse_depth['scale_mat']
             p_world_sparse, mask_pred_sparse, _ = self.pixels_to_world(
-                p, camera_mat, world_mat, scale_mat, c, it)
+                p, cameras, c, it)
         else:
             p_world_sparse, mask_pred_sparse = None, None
 
@@ -220,25 +219,20 @@ class DVR(nn.Module):
 
         return d_hat, mask_pred, mask_zero_occupied
 
-    def pixels_to_world(self, pixels, camera_mat, world_mat, scale_mat, c,
+    def pixels_to_world(self, pixels, cameras, c,
                         it=None, sampling_accuracy=None):
         ''' Projects pixels to the world coordinate system.
 
         Args:
             pixels (tensor): sampled pixels in range [-1, 1]
-            camera_mat (tensor): camera matrices
-            world_mat (tensor): world matrices
-            scale_mat (tensor): scale matrices
             c (tensor): latent conditioned code c
             it (int): training iteration (used for ray sampling scheduler)
             sampling_accuracy (tuple): if not None, this overwrites the default
                 sampling accuracy ([128, 129])
         '''
         batch_size, n_points, _ = pixels.shape
-        pixels_world = image_points_to_world(pixels, camera_mat, world_mat,
-                                             scale_mat)
-        camera_world = origin_to_world(n_points, camera_mat, world_mat,
-                                       scale_mat)
+        pixels_world = image_points_to_world(pixels, cameras)
+        camera_world = origin_to_world(n_points, cameras)
         ray_vector = (pixels_world - camera_world)
 
         d_hat, mask_pred, mask_zero_occupied = self.march_along_ray(

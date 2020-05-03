@@ -23,11 +23,13 @@ def get_model(cfg, device=None, len_dataset=0, **kwargs):
     # Add the depth range to depth function kwargs
     depth_range = cfg['data']['depth_range']
     depth_function_kwargs['depth_range'] = depth_range
+    depth_function_kwargs['schedule_milestones'] = cfg['training']['scheduler_milestones']
 
     # Load always the decoder
     decoder = models.decoder_dict[decoder](
         dim=dim, c_dim=c_dim, **decoder_kwargs
     )
+    print(decoder)
 
     # Load encoder
     if encoder == 'idx':
@@ -52,7 +54,7 @@ def get_trainer(model, optimizer, cfg, device, generator, **kwargs):
         optimizer (optimizer): pytorch optimizer object
         cfg (dict): imported yaml config
         device (device): pytorch device
-        generator (Generator): generator instance to 
+        generator (Generator): generator instance to
             generate meshes for visualization
     '''
     threshold = cfg['test']['threshold']
@@ -81,7 +83,7 @@ def get_trainer(model, optimizer, cfg, device, generator, **kwargs):
 
     trainer = training.Trainer(
         model, optimizer, device=device, vis_dir=vis_dir, threshold=threshold,
-        n_training_points=n_training_points, 
+        n_training_points=n_training_points,
         lambda_freespace=lambda_freespace, lambda_occupied=lambda_occupied,
         lambda_rgb=lambda_rgb, lambda_depth=lambda_depth, generator=generator,
         n_eval_points=n_eval_points,

@@ -95,6 +95,7 @@ class DepthModule(nn.Module):
             else:
                 n_steps = self.n_steps
         if n_steps[1] > 1:
+            # decoder parameters?
             inputs = [ray0, ray_direction, decoder, c, n_steps,
                       self.n_secant_steps, self.tau, self.depth_range,
                       self.method, self.check_cube_intersection,
@@ -176,13 +177,17 @@ class DepthFunction(torch.autograd.Function):
     def perform_ray_marching(ray0, ray_direction, decoder, c=None,
                              tau=0.5, n_steps=[128, 129], n_secant_steps=8,
                              depth_range=[0., 2.4], method='secant',
-                             check_cube_intersection=True, max_points=3500000):
+                             check_cube_intersection=True, max_points=50000):
         ''' Performs ray marching to detect surface points.
 
         The function returns the surface points as well as d_i of the formula
             ray(d_i) = ray0 + d_i * ray_direction
         which hit the surface points. In addition, masks are returned for
         illegal values.
+
+        First determine an depth interval for intersections by evaluating an equally
+        distributed depth steps and find the change of outside->inside.
+        Then apply secan approximation like in Controlling Neural Levelset.
 
         Args:
             ray0 (tensor): ray start points of dimension B x N x 3
@@ -302,6 +307,9 @@ class DepthFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, *input):
         ''' Performs a forward pass of the Depth function.
+        By passing in the network parameter and code c as input, even though
+        they are not explicitly used in the forward method (no_grad), we can
+        compute the gradient inside backward function
 
         Args:
             input (list): input to forward function
@@ -333,7 +341,7 @@ class DepthFunction(torch.autograd.Function):
         ''' Performs the backward pass of the Depth function.
 
         We use the analytic formula derived in the main publication for the
-        gradients. 
+        gradients.
 
         Note: As for every input a gradient has to be returned, we return
         None for the elements which do no require gradients (e.g. decoder).

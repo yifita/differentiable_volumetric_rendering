@@ -59,6 +59,8 @@ class Decoder(nn.Module):
                 net_c = self.fc_c[n](c)
                 if batchwise:
                     net_c = net_c.unsqueeze(1)
+                # use plus is quite unconventional
+                # conditonal batch normalization like spade?
                 net = net + net_c
 
             net = self.blocks[n](net)

@@ -20,7 +20,7 @@ model:
 training:
   out_dir:  out/multi_view_reconstruction/skull/ours_rgb
   n_training_points: 2048
-  n_eval_points: 16000
+  n_eval_points: 8000
   model_selection_metric: mask_intersection
   model_selection_mode: maximize
   batch_size: 1

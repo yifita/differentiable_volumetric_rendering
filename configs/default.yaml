@@ -79,9 +79,9 @@ generation:
   vis_n_outputs: 30
   generation_dir: generation
   simplify_nfaces: null
-  padding: 0.0
-  resolution_0: 32
-  upsampling_steps: 3
+  padding: 0.0  # Marching Cube grid
+  resolution_0: 32  # used for Multiresolution IsoSurface Extraction
+  upsampling_steps: 3  # used for Multiresolution IsoSurface Extraction
   refinement_step: 30
   refine_max_faces: 10000
   with_colors: true

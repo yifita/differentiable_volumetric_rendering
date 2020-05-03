@@ -142,6 +142,7 @@ class Generator3D(object):
             mesh_extractor = MISE(
                 self.resolution0, self.upsampling_steps, threshold)
 
+            # points to evaluate, at the beginning, this is resolution0^3
             points = mesh_extractor.query()
 
             while points.shape[0] != 0:
@@ -315,7 +316,7 @@ class Generator3D(object):
     def refine_mesh(self, mesh, occ_hat, c=None):
         ''' Refines the predicted mesh.
 
-        Args:   
+        Args:
             mesh (trimesh object): predicted mesh
             occ_hat (tensor): predicted occupancy grid
             c (tensor): latent conditioned code c

@@ -18,6 +18,9 @@ model:
   lambda_image_gradients: 1.
   lambda_depth: 1.
   lambda_normal: 0.1
+  depth_function_kwargs: {
+    max_points: 100000
+  }
 training:
   out_dir:  out/multi_view_reconstruction/birds/ours_depth_mvs
   n_training_points: 2048
@@ -30,7 +33,8 @@ training:
   scheduler_gamma: 0.5
   depth_loss_on_world_points: True
   validate_every: 5000
-  visualize_every: 10000
+  visualize_every: 500
+  overwrite_visualization: False
 generation:
   upsampling_steps: 4
   refinement_step: 30

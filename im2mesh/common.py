@@ -3,6 +3,8 @@ from im2mesh.utils.libkdtree import KDTree
 import numpy as np
 import logging
 from copy import deepcopy
+import plyfile
+import os
 
 
 logger_py = logging.getLogger(__name__)
@@ -114,7 +116,8 @@ def check_ray_intersection_with_unit_cube(ray0, ray_direction, padding=0.1,
     ''' Checks if rays ray0 + d * ray_direction intersect with unit cube with
     padding padding.
 
-    It returns the two intersection points as well as the sorted ray lengths d.
+    It returns the two intersection points (B,N,2,3) as well as the sorted ray lengths
+    d (B,N,2) and the mask for points inside the unit cube (B,N)
 
     Args:
         ray0 (tensor): Start positions of the rays
@@ -126,10 +129,11 @@ def check_ray_intersection_with_unit_cube(ray0, ray_direction, padding=0.1,
     device = ray0.device
 
     # calculate intersections with unit cube (< . , . >  is the dot product)
+    # n is the normal of planes of the cube [1,0,0],[0,1,0],[0,0,1]
     # <n, x - p> = <n, ray0 + d * ray_direction - p_e> = 0
     # d = - <n, ray0 - p_e> / <n, ray_direction>
 
-    # Get points on plane p_e
+    # Get points on plane p_e (need two points for 6 planes)
     p_distance = 0.5 + padding/2
     p_e = torch.ones(batch_size, n_pts, 6).to(device) * p_distance
     p_e[:, :, 3:] *= -1.
@@ -137,11 +141,13 @@ def check_ray_intersection_with_unit_cube(ray0, ray_direction, padding=0.1,
     # Calculate the intersection points with given formula
     nominator = p_e - ray0.repeat(1, 1, 2)
     denominator = ray_direction.repeat(1, 1, 2)
+    # d_intersect for all 6 planes
     d_intersect = nominator / denominator
+    # (B, N, 6, 3)
     p_intersect = ray0.unsqueeze(-2) + d_intersect.unsqueeze(-1) * \
         ray_direction.unsqueeze(-2)
 
-    # Calculate mask where points intersect unit cube
+    # Calculate mask where points intersect unit cube (B,N,6)
     p_mask_inside_cube = (
         (p_intersect[:, :, :, 0] <= p_distance + eps) &
         (p_intersect[:, :, :, 1] <= p_distance + eps) &
@@ -154,7 +160,7 @@ def check_ray_intersection_with_unit_cube(ray0, ray_direction, padding=0.1,
     # Correct rays are these which intersect exactly 2 times
     mask_inside_cube = p_mask_inside_cube.sum(-1) == 2
 
-    # Get interval values for p's which are valid
+    # Get interval values for p's which are valid (B,M,6,3)->(B,M,2,3)
     p_intervals = p_intersect[mask_inside_cube][p_mask_inside_cube[
         mask_inside_cube]].view(-1, 2, 3)
     p_intervals_batch = torch.zeros(batch_size, n_pts, 2, 3).to(device)
@@ -182,40 +188,35 @@ def check_ray_intersection_with_unit_cube(ray0, ray_direction, padding=0.1,
 
 
 def intersect_camera_rays_with_unit_cube(
-        pixels, camera_mat, world_mat, scale_mat, padding=0.1, eps=1e-6,
+        pixels, cameras, padding=0.1, eps=1e-6,
         use_ray_length_as_depth=True):
     ''' Returns the intersection points of ray cast from camera origin to
     pixel points p on the image plane.
 
-    The function returns the intersection points as well the depth values and
-    a mask specifying which ray intersects the unit cube.
+    The function returns the intersection points (B,N,2,3) as well the depth values (B,N,2) and
+    a mask (B,N) specifying which ray intersects the unit cube.
 
     Args:
         pixels (tensor): Pixel points on image plane (range [-1, 1])
-        camera_mat (tensor): camera matrix
-        world_mat (tensor): world matrix
-        scale_mat (tensor): scale matrix
         padding (float): Padding which is applied to the unit cube
         eps (float): The epsilon value for numerical stability
-
+        use_ray_length_as_depth (bool): use ray length instead of instead of z-value as depth
     '''
     batch_size, n_points, _ = pixels.shape
 
     pixel_world = image_points_to_world(
-        pixels, camera_mat, world_mat, scale_mat)
-    camera_world = origin_to_world(
-        n_points, camera_mat, world_mat, scale_mat)
+        pixels, cameras)
+    camera_world = origin_to_world()
     ray_vector = (pixel_world - camera_world)
 
     p_cube, d_cube, mask_cube = check_ray_intersection_with_unit_cube(
         camera_world, ray_vector, padding=padding, eps=eps)
     if not use_ray_length_as_depth:
         p_cam = transform_to_camera_space(p_cube.view(
-            batch_size, -1, 3), camera_mat, world_mat, scale_mat).view(
+            batch_size, -1, 3), cameras).view(
                 batch_size, n_points, -1, 3)
         d_cube = p_cam[:, :, :, -1]
     return p_cube, d_cube, mask_cube
-
 
 def arange_pixels(resolution=(128, 128), batch_size=1, image_range=(-1., 1.),
                   subsample_to=None):
@@ -377,9 +378,13 @@ def get_tensor_values(tensor, p, grid_sample=True, mode='nearest',
     batch_size, _, h, w = tensor.shape
 
     if grid_sample:
+        # (B,1,N,2)
         p = p.unsqueeze(1)
+        # (B,c,1,N)
         values = torch.nn.functional.grid_sample(tensor, p, mode=mode)
+        # (B,c,N)
         values = values.squeeze(2)
+        # (B,N,c)
         values = values.permute(0, 2, 1)
     else:
         p[:, :, 0] = (p[:, :, 0] + 1) * (w) / 2
@@ -406,7 +411,7 @@ def get_tensor_values(tensor, p, grid_sample=True, mode='nearest',
     return values
 
 
-def transform_to_world(pixels, depth, camera_mat, world_mat, scale_mat,
+def transform_to_world(pixels, depth, cameras,
                        invert=True):
     ''' Transforms pixel positions p with given depth value d to world coordinates.
 
@@ -422,36 +427,16 @@ def transform_to_world(pixels, depth, camera_mat, world_mat, scale_mat,
 
     # Convert to pytorch
     pixels, is_numpy = to_pytorch(pixels, True)
-    depth = to_pytorch(depth)
-    camera_mat = to_pytorch(camera_mat)
-    world_mat = to_pytorch(world_mat)
-    scale_mat = to_pytorch(scale_mat)
 
-    # Invert camera matrices
-    if invert:
-        camera_mat = torch.inverse(camera_mat)
-        world_mat = torch.inverse(world_mat)
-        scale_mat = torch.inverse(scale_mat)
-
-    # Transform pixels to homogen coordinates
-    pixels = pixels.permute(0, 2, 1)
-    pixels = torch.cat([pixels, torch.ones_like(pixels)], dim=1)
-
-    # Project pixels into camera space
-    pixels[:, :3] = pixels[:, :3] * depth.permute(0, 2, 1)
-
-    # Transform pixels to world space
-    p_world = scale_mat @ world_mat @ camera_mat @ pixels
-
-    # Transform p_world back to 3D coordinates
-    p_world = p_world[:, :3].permute(0, 2, 1)
+    xy_depth = torch.cat([pixels, depth], dim=-1)
+    p_world = cameras.unproject_points(xy_depth)
 
     if is_numpy:
         p_world = p_world.numpy()
     return p_world
 
 
-def transform_to_camera_space(p_world, camera_mat, world_mat, scale_mat):
+def transform_to_camera_space(p_world, cameras):
     ''' Transforms world points to camera space.
         Args:
         p_world (tensor): world points tensor of size B x N x 3
@@ -462,52 +447,25 @@ def transform_to_camera_space(p_world, camera_mat, world_mat, scale_mat):
     batch_size, n_p, _ = p_world.shape
     device = p_world.device
 
-    # Transform world points to homogen coordinates
-    p_world = torch.cat([p_world, torch.ones(
-        batch_size, n_p, 1).to(device)], dim=-1).permute(0, 2, 1)
-
-    # Apply matrices to transform p_world to camera space
-    p_cam = camera_mat @ world_mat @ scale_mat @ p_world
-
-    # Transform points back to 3D coordinates
-    p_cam = p_cam[:, :3].permute(0, 2, 1)
+    world_to_view_trans = cams.get_world_to_view_transform()
+    p_cam = world_to_view_trans.transform_points(p_world)
     return p_cam
 
 
-def origin_to_world(n_points, camera_mat, world_mat, scale_mat, invert=True):
+def origin_to_world(n_points, cameras):
     ''' Transforms origin (camera location) to world coordinates.
 
     Args:
         n_points (int): how often the transformed origin is repeated in the
             form (batch_size, n_points, 3)
-        camera_mat (tensor): camera matrix
-        world_mat (tensor): world matrix
-        scale_mat (tensor): scale matrix
-        invert (bool): whether to invert the matrices (default: true)
     '''
     batch_size = camera_mat.shape[0]
-    device = camera_mat.device
-
-    # Create origin in homogen coordinates
-    p = torch.zeros(batch_size, 4, n_points).to(device)
-    p[:, -1] = 1.
-
-    # Invert matrices
-    if invert:
-        camera_mat = torch.inverse(camera_mat)
-        world_mat = torch.inverse(world_mat)
-        scale_mat = torch.inverse(scale_mat)
-
-    # Apply transformation
-    p_world = scale_mat @ world_mat @ camera_mat @ p
-
-    # Transform points back to 3D coordinates
-    p_world = p_world[:, :3].permute(0, 2, 1)
+    p_world = cameras.get_camera_center()
+    p_world = p_world.view(-1, 1, 3).expand(-1, n_points, -1)
     return p_world
 
 
-def image_points_to_world(image_points, camera_mat, world_mat, scale_mat,
-                          invert=True):
+def image_points_to_world(image_points, cameras, image_plane_z=1.0):
     ''' Transforms points on image plane to world coordinates.
 
     In contrast to transform_to_world, no depth value is needed as points on
@@ -524,9 +482,8 @@ def image_points_to_world(image_points, camera_mat, world_mat, scale_mat,
     assert(dim == 2)
     device = image_points.device
 
-    d_image = torch.ones(batch_size, n_pts, 1).to(device)
-    return transform_to_world(image_points, d_image, camera_mat, world_mat,
-                              scale_mat, invert=invert)
+    d_image = torch.full((image_plane_z, batch_size, n_pts), image_plane_z).to(device)
+    return transform_to_world(image_points, d_image, cameras)
 
 
 def check_weights(params):
@@ -749,17 +706,18 @@ def make_3d_grid(bb_min, bb_max, shape):
     return p
 
 
-def get_occupancy_loss_points(pixels, camera_mat, world_mat, scale_mat,
+def get_occupancy_loss_points(pixels, cameras,
                               depth_image=None, use_cube_intersection=True,
                               occupancy_random_normal=False,
                               depth_range=[0, 2.4]):
     ''' Returns 3D points for occupancy loss.
+    Penalize pixels that lie inside the object mask but the predicted surface depth is inifite.
+    Use randomly sampled depth value, or in case the depth_image is give, use the ground truth
+    depth to backproject the pixel in space.
 
     Args:
-        pixels (tensor): sampled pixels in range [-1, 1]
-        camera_mat (tensor): camera matrix
-        world_mat (tensor): world matrix
-        scale_mat (tensor): scale matrix
+        pixels (tensor): (N, 3) sampled pixels in range [-1, 1]
+        cameras (camera object)
         depth_image tensor): if not None, these depth values are used for
             initialization (e.g. depth or visual hull depth)
         use_cube_intersection (bool): whether to check unit cube intersection
@@ -774,13 +732,15 @@ def get_occupancy_loss_points(pixels, camera_mat, world_mat, scale_mat,
     if use_cube_intersection:
         _, d_cube_intersection, mask_cube = \
             intersect_camera_rays_with_unit_cube(
-                pixels, camera_mat, world_mat, scale_mat, padding=0.,
+                pixels, cameras, padding=0.,
                 use_ray_length_as_depth=False)
+        # (BM,2)
         d_cube = d_cube_intersection[mask_cube]
 
     d_occupancy = torch.rand(batch_size, n_points).to(device) * depth_range[1]
 
     if use_cube_intersection:
+        # use a random depth between the two intersections with the unit cube
         d_occupancy[mask_cube] = d_cube[:, 0] + \
             torch.rand(d_cube.shape[0]).to(
                 device) * (d_cube[:, 1] - d_cube[:, 0])
@@ -803,15 +763,12 @@ def get_occupancy_loss_points(pixels, camera_mat, world_mat, scale_mat,
     return p_occupancy
 
 
-def get_freespace_loss_points(pixels, camera_mat, world_mat, scale_mat,
+def get_freespace_loss_points(pixels, cameras,
                               use_cube_intersection=True, depth_range=[0, 2.4]):
     ''' Returns 3D points for freespace loss.
 
     Args:
-        pixels (tensor): sampled pixels in range [-1, 1]
-        camera_mat (tensor): camera matrix
-        world_mat (tensor): world matrix
-        scale_mat (tensor): scale matrix
+        pixels (tensor): (B,P,2) sampled pixels in range [-1, 1]
         use_cube_intersection (bool): whether to check unit cube intersection
         depth_range (float): depth range; important when no cube
             intersection is used
@@ -825,9 +782,10 @@ def get_freespace_loss_points(pixels, camera_mat, world_mat, scale_mat,
     if use_cube_intersection:
         _, d_cube_intersection, mask_cube = \
             intersect_camera_rays_with_unit_cube(
-                pixels, camera_mat, world_mat, scale_mat,
+                pixels, cameras,
                 use_ray_length_as_depth=False)
         d_cube = d_cube_intersection[mask_cube]
+        # d_freespace is the depth between the two intersection with the unit cube
         d_freespace[mask_cube] = d_cube[:, 0] + \
             torch.rand(d_cube.shape[0]).to(
                 device) * (d_cube[:, 1] - d_cube[:, 0])
@@ -835,6 +793,7 @@ def get_freespace_loss_points(pixels, camera_mat, world_mat, scale_mat,
     p_freespace = transform_to_world(
         pixels, d_freespace.unsqueeze(-1), camera_mat, world_mat, scale_mat)
     return p_freespace
+
 
 
 def normalize_tensor(tensor, min_norm=1e-5, feat_dim=-1):
@@ -849,3 +808,140 @@ def normalize_tensor(tensor, min_norm=1e-5, feat_dim=-1):
                               min=min_norm)
     normed_tensor = tensor / norm_tensor
     return normed_tensor
+
+
+def get_input_pc(data_dict):
+    """ For 2.5D inputs visualize the initial pointcloud from backprojection
+
+    Returns the point cloud in object coordinate
+    """
+    def process_data_dict(data):
+        ''' Processes the data dictionary and returns respective tensors
+
+        Args:
+            data (dictionary): data dictionary of numpy arrays
+        '''
+        # Get "ordinary" data
+        img = to_pytorch(data.get('img')).unsqueeze(0)
+        mask_img = to_pytorch(data.get('img.mask')).unsqueeze(0).unsqueeze(1)
+        world_mat = to_pytorch(data.get('img.world_mat')).unsqueeze(0)
+        camera_mat = to_pytorch(data.get('img.camera_mat')).unsqueeze(0)
+        scale_mat = to_pytorch(data.get('img.scale_mat')).unsqueeze(0)
+        depth_img = to_pytorch(data.get('img.depth', torch.empty(1, 0)
+                             )).unsqueeze(0).unsqueeze(1)
+        inputs = data.get('inputs', torch.empty(1, 0)).unsqueeze(0)
+
+        # Get sparse point data
+        if 'sparse_depth.p_img' in data:
+            sparse_depth = {}
+            sparse_depth['p'] = to_pytorch(data.get('sparse_depth.p_img')).unsqueeze(0)
+            sparse_depth['p_world'] = to_pytorch(data.get(
+                'sparse_depth.p_world')).unsqueeze(0)
+            sparse_depth['depth_gt'] = to_pytorch(data.get('sparse_depth.d')).unsqueeze(0)
+            sparse_depth['camera_mat'] = to_pytorch(data.get(
+                'sparse_depth.camera_mat')).unsqueeze(0)
+            sparse_depth['world_mat'] = to_pytorch(data.get(
+                'sparse_depth.world_mat')).unsqueeze(0)
+            sparse_depth['scale_mat'] = to_pytorch(data.get(
+                'sparse_depth.scale_mat')).unsqueeze(0)
+        else:
+            sparse_depth = None
+
+        return (img, mask_img, depth_img, world_mat, camera_mat, scale_mat,
+                inputs, sparse_depth)
+
+
+    # load dataset 2.5D images
+    (img, mask_img, depth_img, world_mat, camera_mat, scale_mat,
+            inputs, sparse_depth) = process_data_dict(data_dict)
+
+    if depth_img.shape[-1]==0 and sparse_depth is None:
+        raise ValueError("Dataset does not contain depth information.")
+
+    batch_size, _, h, w = img.shape
+
+    if depth_img.shape[-1]>0:
+        # pixel (B,N,2)
+        pixels = arange_pixels((h, w), batch_size)[1].to(img.device)
+        assert(pixels.shape[1] == h*w)
+        # if annotated mask exists, use this mask to remove outlier points
+        mask_gt = get_tensor_values(
+            mask_img, pixels, squeeze_channel_dim=True).bool()
+
+        # transform to world coordinate
+        depth_gt, mask_gt_depth = get_tensor_values(
+                depth_img, pixels, squeeze_channel_dim=True, with_mask=True)
+
+        mask = mask_gt_depth & mask_gt
+        p_world = transform_to_world(pixels, depth_gt.unsqueeze(-1),
+            camera_mat, world_mat, scale_mat)
+        # get color
+        rgb_gt = get_tensor_values(img, pixels, with_mask=False)
+        dense_points = torch.cat([p_world[mask], rgb_gt[mask]], dim=-1)
+    else:
+        dense_points = None
+
+    # if sparse_depth is available
+    if sparse_depth is not None:
+        sparse_points = sparse_depth['p_world'].squeeze(0)
+    else:
+        sparse_points = None
+
+    return dense_points, sparse_points
+
+def save_ply(points, filename, colors=None, normals=None, binary=True):
+    """
+    save 3D/2D points to ply file
+    Args:
+        points (numpy array): (N,2or3)
+        colors (numpy uint8 array): (N, 3or4)
+    """
+    assert(points.ndim == 2)
+    if points.shape[-1] == 2:
+        points = np.concatenate([points, np.zeros_like(points)[:, :1]], axis=-1)
+
+    vertex = np.core.records.fromarrays(points.transpose(
+        1, 0), names='x, y, z', formats='f4, f4, f4')
+    num_vertex = len(vertex)
+    desc = vertex.dtype.descr
+
+    if normals is not None:
+        assert(normals.ndim == 2)
+        if normals.shape[-1] == 2:
+            normals = np.concatenate([normals, np.zeros_like(normals)[:, :1]], axis=-1)
+        vertex_normal = np.core.records.fromarrays(
+            normals.transpose(1, 0), names='nx, ny, nz', formats='f4, f4, f4')
+        assert len(vertex_normal) == num_vertex
+        desc = desc + vertex_normal.dtype.descr
+
+    if colors is not None:
+        assert len(colors) == num_vertex
+        if colors.max() <= 1:
+            colors = colors * 255
+        if colors.shape[1] == 4:
+            vertex_color = np.core.records.fromarrays(colors.transpose(
+                1, 0), names='red, green, blue, alpha', formats='u1, u1, u1, u1')
+        else:
+            vertex_color = np.core.records.fromarrays(colors.transpose(
+                1, 0), names='red, green, blue', formats='u1, u1, u1')
+        desc = desc + vertex_color.dtype.descr
+
+    vertex_all = np.empty(num_vertex, dtype=desc)
+
+    for prop in vertex.dtype.names:
+        vertex_all[prop] = vertex[prop]
+
+    if normals is not None:
+        for prop in vertex_normal.dtype.names:
+            vertex_all[prop] = vertex_normal[prop]
+
+    if colors is not None:
+        for prop in vertex_color.dtype.names:
+            vertex_all[prop] = vertex_color[prop]
+
+    ply = plyfile.PlyData(
+        [plyfile.PlyElement.describe(vertex_all, 'vertex')], text=(not binary))
+    if not os.path.exists(os.path.dirname(filename)):
+        os.makedirs(os.path.dirname(filename))
+
+    ply.write(filename)

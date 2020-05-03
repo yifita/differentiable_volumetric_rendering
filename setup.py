@@ -83,6 +83,7 @@ ext_modules = [
 ]
 
 setup(
+    name="im2mesh",
     ext_modules=cythonize(ext_modules),
     cmdclass={
         'build_ext': BuildExtension
