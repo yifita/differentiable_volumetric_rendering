@@ -106,6 +106,8 @@ class Trainer(BaseTrainer):
         Args:
             data (dict): data dictionary
             it (int): training iteration
+        Returns:
+            a scalar loss tensor
         '''
         self.model.train()
         self.optimizer.zero_grad()
@@ -377,7 +379,6 @@ class Trainer(BaseTrainer):
                                     image_resolution=(h, w),
                                     continuous=self.sample_continuous,
                                     ).to(device)
-
         # Apply losses
         # 1.) Get Object Mask values and define masks for losses
         mask_gt = get_tensor_values(

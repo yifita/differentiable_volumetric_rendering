@@ -31,7 +31,7 @@ data:
   ignore_image_idx: []
 model:
   decoder: simple
-  encoder: resnet18
+  encoder: None
   decoder_kwargs: {}
   encoder_kwargs: {}
   depth_function_kwargs: {}

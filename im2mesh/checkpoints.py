@@ -75,9 +75,10 @@ class CheckpointIO(object):
 
         if os.path.exists(filename):
             print(filename)
-            print('=> Loading checkpoint from local file...')
+            print('=> Loading checkpoint from local file...', end='')
             state_dict = torch.load(filename)
             scalars = self.parse_state_dict(state_dict)
+            print('Done!')
             return scalars
         else:
             raise FileExistsError
@@ -89,9 +90,10 @@ class CheckpointIO(object):
             url (str): url to saved model
         '''
         print(url)
-        print('=> Loading checkpoint from url...')
+        print('=> Loading checkpoint from url...', end='')
         state_dict = model_zoo.load_url(url, progress=True)
         scalars = self.parse_state_dict(state_dict)
+        print('Done!')
         return scalars
 
     def parse_state_dict(self, state_dict):

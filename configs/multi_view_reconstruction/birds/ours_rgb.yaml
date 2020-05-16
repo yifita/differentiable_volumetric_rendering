@@ -33,6 +33,7 @@ training:
   depth_loss_on_world_points: True
   validate_every: 5000
   visualize_every: 10000
+  overwrite_visualization: False
 generation:
   upsampling_steps: 4
   refinement_step: 30

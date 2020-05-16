@@ -112,18 +112,22 @@ def get_proposal_points_in_unit_cube(ray0, ray_direction, padding=0.1,
 
 
 def check_ray_intersection_with_unit_cube(ray0, ray_direction, padding=0.1,
-                                          eps=1e-6):
+                                          image_plane_z=1.0, eps=1e-6):
     ''' Checks if rays ray0 + d * ray_direction intersect with unit cube with
     padding padding.
 
     It returns the two intersection points (B,N,2,3) as well as the sorted ray lengths
-    d (B,N,2) and the mask for points inside the unit cube (B,N)
+    d (B,N,2) and the mask for points inside the unit cube (B,N).
 
     Args:
         ray0 (tensor): Start positions of the rays
         ray_direction (tensor): Directions of rays
         padding (float): Padding which is applied to the unit cube
         eps (float): The epsilon value for numerical stability
+    Returns:
+        p_intervals_batch: (B, P, 2, 3) two intersecting points sorted in order of intersection
+        d_intervals_batch: (B, P, 2) ray length at the intersecting points
+        mask_inside_cube: (B, P) whether the ray intersects with the unit cube
     '''
     batch_size, n_pts, _ = ray0.shape
     device = ray0.device
@@ -160,6 +164,9 @@ def check_ray_intersection_with_unit_cube(ray0, ray_direction, padding=0.1,
     # Correct rays are these which intersect exactly 2 times
     mask_inside_cube = p_mask_inside_cube.sum(-1) == 2
 
+    if ~torch.any(mask_inside_cube):
+        logger_py.warning("No camera rays intersect with the unit cube. Something is odd.")
+
     # Get interval values for p's which are valid (B,M,6,3)->(B,M,2,3)
     p_intervals = p_intersect[mask_inside_cube][p_mask_inside_cube[
         mask_inside_cube]].view(-1, 2, 3)
@@ -169,6 +176,8 @@ def check_ray_intersection_with_unit_cube(ray0, ray_direction, padding=0.1,
     # Calculate ray lengths for the interval points
     d_intervals_batch = torch.zeros(batch_size, n_pts, 2).to(device)
     norm_ray = torch.norm(ray_direction[mask_inside_cube], dim=-1)
+    if not (torch.all(norm_ray > 0)):
+        logger_py.error("Ray_direction contains 0-length vectors.")
     d_intervals_batch[mask_inside_cube] = torch.stack([
         torch.norm(p_intervals[:, 0] -
                    ray0[mask_inside_cube], dim=-1) / norm_ray,
@@ -184,6 +193,8 @@ def check_ray_intersection_with_unit_cube(ray0, ray_direction, padding=0.1,
         indices_sort
     ]
 
+    check_tensor(p_intervals_batch, 'p_intervals_batch')
+    check_tensor(d_intervals_batch, 'd_intervals_batch')
     return p_intervals_batch, d_intervals_batch, mask_inside_cube
 
 
@@ -198,6 +209,7 @@ def intersect_camera_rays_with_unit_cube(
 
     Args:
         pixels (tensor): Pixel points on image plane (range [-1, 1])
+        cameras (pytorch3d cameras): Cameras object
         padding (float): Padding which is applied to the unit cube
         eps (float): The epsilon value for numerical stability
         use_ray_length_as_depth (bool): use ray length instead of instead of z-value as depth
@@ -206,9 +218,8 @@ def intersect_camera_rays_with_unit_cube(
 
     pixel_world = image_points_to_world(
         pixels, cameras)
-    camera_world = origin_to_world()
+    camera_world = origin_to_world(n_points, cameras)
     ray_vector = (pixel_world - camera_world)
-
     p_cube, d_cube, mask_cube = check_ray_intersection_with_unit_cube(
         camera_world, ray_vector, padding=padding, eps=eps)
     if not use_ray_length_as_depth:
@@ -216,7 +227,12 @@ def intersect_camera_rays_with_unit_cube(
             batch_size, -1, 3), cameras).view(
                 batch_size, n_points, -1, 3)
         d_cube = p_cam[:, :, :, -1]
+    # if d_cube <= 0 (or cameras's image plane?) then set mask_cube to False
+    mask_cube[torch.any(d_cube <= 0, dim=-1)] = False
+    check_tensor(p_cube, 'p_cube')
+    check_tensor(d_cube, 'd_cube')
     return p_cube, d_cube, mask_cube
+
 
 def arange_pixels(resolution=(128, 128), batch_size=1, image_range=(-1., 1.),
                   subsample_to=None):
@@ -381,7 +397,12 @@ def get_tensor_values(tensor, p, grid_sample=True, mode='nearest',
         # (B,1,N,2)
         p = p.unsqueeze(1)
         # (B,c,1,N)
-        values = torch.nn.functional.grid_sample(tensor, p, mode=mode)
+        # NOTE pytorch 1.5 returns 0.0 for -1/1 grid if padding_mode is zero,
+        # so we need to make sure that grid p is indeed between -1 and 1
+        if not (p.min() >= -1.0 and p.max() <= 1.0).item():
+            raise ValueError("grid value out of range [-1, 1].")
+
+        values = torch.nn.functional.grid_sample(tensor, p, mode=mode, padding_mode='border')
         # (B,c,N)
         values = values.squeeze(2)
         # (B,N,c)
@@ -411,16 +432,13 @@ def get_tensor_values(tensor, p, grid_sample=True, mode='nearest',
     return values
 
 
-def transform_to_world(pixels, depth, cameras,
-                       invert=True):
+def transform_to_world(pixels, depth, cameras):
     ''' Transforms pixel positions p with given depth value d to world coordinates.
-
+    NOTE: assume positions p is increasing from left to right, and top to down (left-hand system).
+    The NDC system used by pytorch3d is reversed (right-hand system).
     Args:
         pixels (tensor): pixel tensor of size B x N x 2
         depth (tensor): depth tensor of size B x N x 1
-        camera_mat (tensor): camera matrix
-        world_mat (tensor): world matrix
-        scale_mat (tensor): scale matrix
         invert (bool): whether to invert matrices (default: true)
     '''
     assert(pixels.shape[-1] == 2)
@@ -428,9 +446,9 @@ def transform_to_world(pixels, depth, cameras,
     # Convert to pytorch
     pixels, is_numpy = to_pytorch(pixels, True)
 
-    xy_depth = torch.cat([pixels, depth], dim=-1)
+    xy_depth = torch.cat([-pixels, depth], dim=-1)
     p_world = cameras.unproject_points(xy_depth)
-
+    check_tensor(p_world, 'p_world')
     if is_numpy:
         p_world = p_world.numpy()
     return p_world
@@ -440,14 +458,11 @@ def transform_to_camera_space(p_world, cameras):
     ''' Transforms world points to camera space.
         Args:
         p_world (tensor): world points tensor of size B x N x 3
-        camera_mat (tensor): camera matrix
-        world_mat (tensor): world matrix
-        scale_mat (tensor): scale matrix
     '''
     batch_size, n_p, _ = p_world.shape
     device = p_world.device
 
-    world_to_view_trans = cams.get_world_to_view_transform()
+    world_to_view_trans = cameras.get_world_to_view_transform()
     p_cam = world_to_view_trans.transform_points(p_world)
     return p_cam
 
@@ -459,13 +474,13 @@ def origin_to_world(n_points, cameras):
         n_points (int): how often the transformed origin is repeated in the
             form (batch_size, n_points, 3)
     '''
-    batch_size = camera_mat.shape[0]
+    batch_size = cameras.R.shape[0]
     p_world = cameras.get_camera_center()
-    p_world = p_world.view(-1, 1, 3).expand(-1, n_points, -1)
+    p_world = p_world.view(batch_size, 1, 3).expand(-1, n_points, -1)
     return p_world
 
 
-def image_points_to_world(image_points, cameras, image_plane_z=1.0):
+def image_points_to_world(image_points, cameras):
     ''' Transforms points on image plane to world coordinates.
 
     In contrast to transform_to_world, no depth value is needed as points on
@@ -473,17 +488,22 @@ def image_points_to_world(image_points, cameras, image_plane_z=1.0):
 
     Args:
         image_points (tensor): image points tensor of size B x N x 2
-        camera_mat (tensor): camera matrix
-        world_mat (tensor): world matrix
-        scale_mat (tensor): scale matrix
         invert (bool): whether to invert matrices (default: true)
     '''
     batch_size, n_pts, dim = image_points.shape
     assert(dim == 2)
     device = image_points.device
+    image_plane_z = torch.tensor((1, ), device=device)
+    try:
+        image_plane_z = cameras.znear
+    except AttributeError as e:
+        image_plane_z = cameras.focal_length
+    except Exception:
+        logger_py.error('Couldn\'t figure out the image plane from the cameras instance. ' +
+            'Make sure you are using pytorch3d cameras')
 
-    d_image = torch.full((image_plane_z, batch_size, n_pts), image_plane_z).to(device)
-    return transform_to_world(image_points, d_image, cameras)
+    image_plane_z = image_plane_z.view(-1, 1, 1).expand(batch_size, n_pts, 1)
+    return transform_to_world(image_points, image_plane_z, cameras)
 
 
 def check_weights(params):
@@ -508,7 +528,13 @@ def check_tensor(tensor, tensorname='', input_tensor=None):
     if torch.isnan(tensor).any():
         logger_py.warn('Tensor %s contains nan values.' % tensorname)
         if input_tensor is not None:
+            logger_py.warning('Input was:', input_tensor)
+        import pdb; pdb.set_trace()
+    if not torch.isfinite(tensor).all():
+        logger_py.warn('Tensor %s contains infinite values.' % tensorname)
+        if input_tensor is not None:
             logger_py.warn('Input was:', input_tensor)
+        import pdb; pdb.set_trace()
 
 
 def get_prob_from_logits(logits):
@@ -737,7 +763,9 @@ def get_occupancy_loss_points(pixels, cameras,
         # (BM,2)
         d_cube = d_cube_intersection[mask_cube]
 
-    d_occupancy = torch.rand(batch_size, n_points).to(device) * depth_range[1]
+    # avoid zero depth
+    d_occupancy = torch.rand(batch_size, n_points).to(device) * \
+        (depth_range[1] - depth_range[0]) + depth_range[0]
 
     if use_cube_intersection:
         # use a random depth between the two intersections with the unit cube
@@ -758,13 +786,13 @@ def get_occupancy_loss_points(pixels, cameras,
             depth_image, pixels, squeeze_channel_dim=True, with_mask=True)
         d_occupancy[mask_gt_depth] = depth_gt[mask_gt_depth]
 
-    p_occupancy = transform_to_world(pixels, d_occupancy.unsqueeze(-1),
-                                     camera_mat, world_mat, scale_mat)
+    p_occupancy = transform_to_world(
+        pixels, d_occupancy.unsqueeze(-1), cameras)
     return p_occupancy
 
 
 def get_freespace_loss_points(pixels, cameras,
-                              use_cube_intersection=True, depth_range=[0, 2.4]):
+                              use_cube_intersection=True, depth_range=[1.0, 2.4]):
     ''' Returns 3D points for freespace loss.
 
     Args:
@@ -776,8 +804,9 @@ def get_freespace_loss_points(pixels, cameras,
     device = pixels.device
     batch_size, n_points, _ = pixels.shape
 
+    # sample between the depth range. avoid 0 depth
     d_freespace = torch.rand(batch_size, n_points).to(device) * \
-        depth_range[1]
+        (depth_range[0]-depth_range[1]) + depth_range[0]
 
     if use_cube_intersection:
         _, d_cube_intersection, mask_cube = \
@@ -791,9 +820,8 @@ def get_freespace_loss_points(pixels, cameras,
                 device) * (d_cube[:, 1] - d_cube[:, 0])
 
     p_freespace = transform_to_world(
-        pixels, d_freespace.unsqueeze(-1), camera_mat, world_mat, scale_mat)
+        pixels, d_freespace.unsqueeze(-1), cameras)
     return p_freespace
-
 
 
 def normalize_tensor(tensor, min_norm=1e-5, feat_dim=-1):
@@ -828,16 +856,18 @@ def get_input_pc(data_dict):
         camera_mat = to_pytorch(data.get('img.camera_mat')).unsqueeze(0)
         scale_mat = to_pytorch(data.get('img.scale_mat')).unsqueeze(0)
         depth_img = to_pytorch(data.get('img.depth', torch.empty(1, 0)
-                             )).unsqueeze(0).unsqueeze(1)
+                                        )).unsqueeze(0).unsqueeze(1)
         inputs = data.get('inputs', torch.empty(1, 0)).unsqueeze(0)
 
         # Get sparse point data
         if 'sparse_depth.p_img' in data:
             sparse_depth = {}
-            sparse_depth['p'] = to_pytorch(data.get('sparse_depth.p_img')).unsqueeze(0)
+            sparse_depth['p'] = to_pytorch(
+                data.get('sparse_depth.p_img')).unsqueeze(0)
             sparse_depth['p_world'] = to_pytorch(data.get(
                 'sparse_depth.p_world')).unsqueeze(0)
-            sparse_depth['depth_gt'] = to_pytorch(data.get('sparse_depth.d')).unsqueeze(0)
+            sparse_depth['depth_gt'] = to_pytorch(
+                data.get('sparse_depth.d')).unsqueeze(0)
             sparse_depth['camera_mat'] = to_pytorch(data.get(
                 'sparse_depth.camera_mat')).unsqueeze(0)
             sparse_depth['world_mat'] = to_pytorch(data.get(
@@ -850,17 +880,16 @@ def get_input_pc(data_dict):
         return (img, mask_img, depth_img, world_mat, camera_mat, scale_mat,
                 inputs, sparse_depth)
 
-
     # load dataset 2.5D images
     (img, mask_img, depth_img, world_mat, camera_mat, scale_mat,
-            inputs, sparse_depth) = process_data_dict(data_dict)
+     inputs, sparse_depth) = process_data_dict(data_dict)
 
-    if depth_img.shape[-1]==0 and sparse_depth is None:
+    if depth_img.shape[-1] == 0 and sparse_depth is None:
         raise ValueError("Dataset does not contain depth information.")
 
     batch_size, _, h, w = img.shape
 
-    if depth_img.shape[-1]>0:
+    if depth_img.shape[-1] > 0:
         # pixel (B,N,2)
         pixels = arange_pixels((h, w), batch_size)[1].to(img.device)
         assert(pixels.shape[1] == h*w)
@@ -870,11 +899,10 @@ def get_input_pc(data_dict):
 
         # transform to world coordinate
         depth_gt, mask_gt_depth = get_tensor_values(
-                depth_img, pixels, squeeze_channel_dim=True, with_mask=True)
+            depth_img, pixels, squeeze_channel_dim=True, with_mask=True)
 
         mask = mask_gt_depth & mask_gt
-        p_world = transform_to_world(pixels, depth_gt.unsqueeze(-1),
-            camera_mat, world_mat, scale_mat)
+        p_world = transform_to_world(pixels, depth_gt.unsqueeze(-1), cameras)
         # get color
         rgb_gt = get_tensor_values(img, pixels, with_mask=False)
         dense_points = torch.cat([p_world[mask], rgb_gt[mask]], dim=-1)
@@ -889,6 +917,7 @@ def get_input_pc(data_dict):
 
     return dense_points, sparse_points
 
+
 def save_ply(points, filename, colors=None, normals=None, binary=True):
     """
     save 3D/2D points to ply file
@@ -898,7 +927,8 @@ def save_ply(points, filename, colors=None, normals=None, binary=True):
     """
     assert(points.ndim == 2)
     if points.shape[-1] == 2:
-        points = np.concatenate([points, np.zeros_like(points)[:, :1]], axis=-1)
+        points = np.concatenate(
+            [points, np.zeros_like(points)[:, :1]], axis=-1)
 
     vertex = np.core.records.fromarrays(points.transpose(
         1, 0), names='x, y, z', formats='f4, f4, f4')
@@ -908,7 +938,8 @@ def save_ply(points, filename, colors=None, normals=None, binary=True):
     if normals is not None:
         assert(normals.ndim == 2)
         if normals.shape[-1] == 2:
-            normals = np.concatenate([normals, np.zeros_like(normals)[:, :1]], axis=-1)
+            normals = np.concatenate(
+                [normals, np.zeros_like(normals)[:, :1]], axis=-1)
         vertex_normal = np.core.records.fromarrays(
             normals.transpose(1, 0), names='nx, ny, nz', formats='f4, f4, f4')
         assert len(vertex_normal) == num_vertex
