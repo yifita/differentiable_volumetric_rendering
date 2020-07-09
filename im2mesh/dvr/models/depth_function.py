@@ -31,6 +31,7 @@ class DepthModule(nn.Module):
 
     def __init__(self, tau=0.5, n_steps=[128, 129], n_secant_steps=8,
                  depth_range=[0., 2.4], method='secant',
+                 is_occupancy=True,
                  check_cube_intersection=True, max_points=3700000,
                  schedule_ray_sampling=True,
                  schedule_milestones=[50000, 100000, 250000],
@@ -47,7 +48,7 @@ class DepthModule(nn.Module):
 
         self.schedule_milestones = schedule_milestones
         self.init_resolution = init_resolution
-
+        self.is_occupancy = is_occupancy
         self.calc_depth = DepthFunction.apply
 
     def get_sampling_accuracy(self, it):
@@ -99,11 +100,22 @@ class DepthModule(nn.Module):
             inputs = [ray0, ray_direction, decoder, c, n_steps,
                       self.n_secant_steps, self.tau, self.depth_range,
                       self.method, self.check_cube_intersection,
-                      self.max_points] + [k for k in decoder.parameters()]
+                      self.max_points, self.is_occupancy] + [k for k in decoder.parameters()]
             d_hat = self.calc_depth(*inputs)
         else:
             d_hat = torch.full((batch_size, n_p), np.inf).to(device)
         return d_hat
+
+
+def _compare_func(is_occupancy, tau_logit=0.0):
+    def less_than(data):
+        return data < tau_logit
+    def greater_than(data):
+        return data > tau_logit
+    if is_occupancy:
+        return less_than
+    else:
+        return greater_than
 
 
 class DepthFunction(torch.autograd.Function):
@@ -143,7 +155,7 @@ class DepthFunction(torch.autograd.Function):
     @staticmethod
     def run_Secant_method(f_low, f_high, d_low, d_high, n_secant_steps,
                           ray0_masked, ray_direction_masked, decoder, c,
-                          logit_tau):
+                          logit_tau, compare_func):
         ''' Runs the secant method for interval [d_low, d_high].
 
         Args:
@@ -162,7 +174,10 @@ class DepthFunction(torch.autograd.Function):
             with torch.no_grad():
                 f_mid = decoder(p_mid, c, batchwise=False,
                                 only_occupancy=True) - logit_tau
-            ind_low = f_mid < 0
+                f_mid.squeeze_(-1)
+            # ind_low masks f_mid has the same sign as d_low
+            # if decoder outputs sdf, d_low (start) is > 0,
+            ind_low = compare_func(f_mid)
             if ind_low.sum() > 0:
                 d_low[ind_low] = d_pred[ind_low]
                 f_low[ind_low] = f_mid[ind_low]
@@ -174,7 +189,8 @@ class DepthFunction(torch.autograd.Function):
         return d_pred
 
     @staticmethod
-    def perform_ray_marching(ray0, ray_direction, decoder, c=None,
+    def perform_ray_marching(ray0, ray_direction, decoder, compare_func,
+                             c=None,
                              tau=0.5, n_steps=[128, 129], n_secant_steps=8,
                              depth_range=[0., 2.4], method='secant',
                              check_cube_intersection=True, max_points=50000):
@@ -193,6 +209,8 @@ class DepthFunction(torch.autograd.Function):
             ray0 (tensor): ray start points of dimension B x N x 3
             ray_direction (tensor):ray direction vectors of dim B x N x 3
             decoder (nn.Module): decoder model to evaluate point occupancies
+            compare_func (func): less than for occupancy network, greater than for
+                sdf network.
             c (tensor): latent conditioned code
             tay (float): threshold value
             n_steps (tuple): interval from which the number of evaluation
@@ -239,7 +257,7 @@ class DepthFunction(torch.autograd.Function):
                         batch_size, -1, n_steps)
 
         # Create mask for valid points where the first point is not occupied
-        mask_0_not_occupied = val[:, :, 0] < 0
+        mask_0_not_occupied = compare_func(val[:, :, 0])
 
         # Calculate if sign change occurred and concat 1 (no sign change) in
         # last dimension
@@ -248,13 +266,15 @@ class DepthFunction(torch.autograd.Function):
                                 dim=-1)
         cost_matrix = sign_matrix * torch.arange(
             n_steps, 0, -1).float().to(device)
+
         # Get first sign change and mask for values where a.) a sign changed
         # occurred and b.) no a neg to pos sign change occurred (meaning from
         # inside surface to outside)
+        # NOTE: for sdf value b.) becomes from pos to neg
         values, indices = torch.min(cost_matrix, -1)
         mask_sign_change = values < 0
-        mask_neg_to_pos = val[torch.arange(batch_size).unsqueeze(-1),
-                              torch.arange(n_pts).unsqueeze(-0), indices] < 0
+        mask_neg_to_pos = compare_func(val[torch.arange(batch_size).unsqueeze(-1),
+                                            torch.arange(n_pts).unsqueeze(-0), indices])
 
         # Define mask where a valid depth value is found
         mask = mask_sign_change & mask_neg_to_pos & mask_0_not_occupied
@@ -262,12 +282,13 @@ class DepthFunction(torch.autograd.Function):
         # Get depth values and function values for the interval
         # to which we want to apply the Secant method
         n = batch_size * n_pts
+        # Again, for SDF decoder d_low is actually d_high
         d_low = d_proposal.view(
             n, n_steps, 1)[torch.arange(n), indices.view(n)].view(
                 batch_size, n_pts)[mask]
         f_low = val.view(n, n_steps, 1)[torch.arange(n), indices.view(n)].view(
             batch_size, n_pts)[mask]
-        indices = torch.clamp(indices + 1, max=n_steps-1)
+        indices = torch.clamp(indices + 1, max=n_steps - 1)
         d_high = d_proposal.view(
             n, n_steps, 1)[torch.arange(n), indices.view(n)].view(
                 batch_size, n_pts)[mask]
@@ -286,11 +307,11 @@ class DepthFunction(torch.autograd.Function):
         if method == 'secant' and mask.sum() > 0:
             d_pred = DepthFunction.run_Secant_method(
                 f_low, f_high, d_low, d_high, n_secant_steps, ray0_masked,
-                ray_direction_masked, decoder, c, logit_tau)
+                ray_direction_masked, decoder, c, logit_tau, compare_func)
         elif method == 'bisection' and mask.sum() > 0:
             d_pred = DepthFunction.run_Bisection_method(
                 d_low, d_high, n_secant_steps, ray0_masked,
-                ray_direction_masked, decoder, c, logit_tau)
+                ray_direction_masked, decoder, c, logit_tau, compare_func)
         else:
             d_pred = torch.ones(ray_direction_masked.shape[0]).to(device)
 
@@ -315,13 +336,14 @@ class DepthFunction(torch.autograd.Function):
             input (list): input to forward function
         '''
         (ray0, ray_direction, decoder, c, n_steps, n_secant_steps, tau,
-         depth_range, method, check_cube_intersection, max_points) = input[:11]
+         depth_range, method, check_cube_intersection, max_points, is_occupancy) = input[:12]
 
         # Get depth values
         with torch.no_grad():
+            logit_tau = get_logits_from_prob(tau)
             d_pred, p_pred, mask, mask_0_not_occupied = \
                 DepthFunction.perform_ray_marching(
-                    ray0, ray_direction, decoder, c, tau, n_steps,
+                    ray0, ray_direction, decoder, _compare_func(is_occupancy, tau_logit=logit_tau), c, tau, n_steps,
                     n_secant_steps, depth_range, method, check_cube_intersection,
                     max_points)
 
@@ -389,5 +411,5 @@ class DepthFunction(torch.autograd.Function):
         # Return gradients for c, z, and network parameters and None
         # for all other inputs
         out = [None, None, None, gradc, None, None, None, None, None,
-               None, None] + list(grad_phi)
+               None, None, None] + list(grad_phi)
         return tuple(out)

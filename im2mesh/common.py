@@ -138,7 +138,7 @@ def check_ray_intersection_with_unit_cube(ray0, ray_direction, padding=0.1,
     # d = - <n, ray0 - p_e> / <n, ray_direction>
 
     # Get points on plane p_e (need two points for 6 planes)
-    p_distance = 0.5 + padding/2
+    p_distance = 0.5 + padding / 2
     p_e = torch.ones(batch_size, n_pts, 6).to(device) * p_distance
     p_e[:, :, 3:] *= -1.
 
@@ -165,7 +165,8 @@ def check_ray_intersection_with_unit_cube(ray0, ray_direction, padding=0.1,
     mask_inside_cube = p_mask_inside_cube.sum(-1) == 2
 
     if ~torch.any(mask_inside_cube):
-        logger_py.warning("No camera rays intersect with the unit cube. Something is odd.")
+        logger_py.warning(
+            "No camera rays intersect with the unit cube. Something is odd.")
 
     # Get interval values for p's which are valid (B,M,6,3)->(B,M,2,3)
     p_intervals = p_intersect[mask_inside_cube][p_mask_inside_cube[
@@ -397,12 +398,13 @@ def get_tensor_values(tensor, p, grid_sample=True, mode='nearest',
         # (B,1,N,2)
         p = p.unsqueeze(1)
         # (B,c,1,N)
-        # NOTE pytorch 1.5 returns 0.0 for -1/1 grid if padding_mode is zero,
-        # so we need to make sure that grid p is indeed between -1 and 1
-        if not (p.min() >= -1.0 and p.max() <= 1.0).item():
-            raise ValueError("grid value out of range [-1, 1].")
+        # # NOTE pytorch 1.5 returns 0.0 for -1/1 grid if padding_mode is zero,
+        # # so we need to make sure that grid p is indeed between -1 and 1
+        # if not (p.min() >= -1.0 and p.max() <= 1.0).item():
+        #     raise ValueError("grid value out of range [-1, 1].")
 
-        values = torch.nn.functional.grid_sample(tensor, p, mode=mode, padding_mode='border')
+        values = torch.nn.functional.grid_sample(
+            tensor, p, mode=mode, padding_mode='reflection', align_corners=True)
         # (B,c,N)
         values = values.squeeze(2)
         # (B,N,c)
@@ -446,6 +448,7 @@ def transform_to_world(pixels, depth, cameras):
     # Convert to pytorch
     pixels, is_numpy = to_pytorch(pixels, True)
 
+    # NOTE: negate pixels because pytorch3d NDC have x and y directions inversed
     xy_depth = torch.cat([-pixels, depth], dim=-1)
     p_world = cameras.unproject_points(xy_depth)
     check_tensor(p_world, 'p_world')
@@ -500,7 +503,7 @@ def image_points_to_world(image_points, cameras):
         image_plane_z = cameras.focal_length
     except Exception:
         logger_py.error('Couldn\'t figure out the image plane from the cameras instance. ' +
-            'Make sure you are using pytorch3d cameras')
+                        'Make sure you are using pytorch3d cameras')
 
     image_plane_z = image_plane_z.view(-1, 1, 1).expand(batch_size, n_pts, 1)
     return transform_to_world(image_points, image_plane_z, cameras)
@@ -529,12 +532,14 @@ def check_tensor(tensor, tensorname='', input_tensor=None):
         logger_py.warn('Tensor %s contains nan values.' % tensorname)
         if input_tensor is not None:
             logger_py.warning('Input was:', input_tensor)
-        import pdb; pdb.set_trace()
+        import pdb
+        pdb.set_trace()
     if not torch.isfinite(tensor).all():
         logger_py.warn('Tensor %s contains infinite values.' % tensorname)
         if input_tensor is not None:
             logger_py.warn('Input was:', input_tensor)
-        import pdb; pdb.set_trace()
+        import pdb
+        pdb.set_trace()
 
 
 def get_prob_from_logits(logits):
@@ -555,7 +560,7 @@ def get_logits_from_prob(probs, eps=1e-4):
         probs (tensor): probability tensor
         eps (float): epsilon value for numerical stability
     '''
-    probs = np.clip(probs, a_min=eps, a_max=1-eps)
+    probs = np.clip(probs, a_min=eps, a_max=1 - eps)
     logits = np.log(probs / (1 - probs))
     return logits
 
@@ -740,7 +745,7 @@ def get_occupancy_loss_points(pixels, cameras,
     Penalize pixels that lie inside the object mask but the predicted surface depth is inifite.
     Use randomly sampled depth value, or in case the depth_image is give, use the ground truth
     depth to backproject the pixel in space.
-
+    NOTE: differs to freespace_loss_points in the case when depth_image is given.
     Args:
         pixels (tensor): (N, 3) sampled pixels in range [-1, 1]
         cameras (camera object)
@@ -755,6 +760,10 @@ def get_occupancy_loss_points(pixels, cameras,
     device = pixels.device
     batch_size, n_points, _ = pixels.shape
 
+    # avoid zero depth
+    d_occupancy = torch.rand(batch_size, n_points).to(device) * \
+        (depth_range[1] - depth_range[0]) + depth_range[0]
+
     if use_cube_intersection:
         _, d_cube_intersection, mask_cube = \
             intersect_camera_rays_with_unit_cube(
@@ -762,16 +771,11 @@ def get_occupancy_loss_points(pixels, cameras,
                 use_ray_length_as_depth=False)
         # (BM,2)
         d_cube = d_cube_intersection[mask_cube]
-
-    # avoid zero depth
-    d_occupancy = torch.rand(batch_size, n_points).to(device) * \
-        (depth_range[1] - depth_range[0]) + depth_range[0]
-
-    if use_cube_intersection:
         # use a random depth between the two intersections with the unit cube
         d_occupancy[mask_cube] = d_cube[:, 0] + \
             torch.rand(d_cube.shape[0]).to(
                 device) * (d_cube[:, 1] - d_cube[:, 0])
+
     if occupancy_random_normal:
         d_occupancy = torch.randn(batch_size, n_points).to(device) \
             * (depth_range[1] / 8) + depth_range[1] / 2
@@ -806,15 +810,15 @@ def get_freespace_loss_points(pixels, cameras,
 
     # sample between the depth range. avoid 0 depth
     d_freespace = torch.rand(batch_size, n_points).to(device) * \
-        (depth_range[0]-depth_range[1]) + depth_range[0]
+        (depth_range[0] - depth_range[1]) + depth_range[0]
 
     if use_cube_intersection:
+        # d_freespace is a random depth between the two intersections with the unit cube
         _, d_cube_intersection, mask_cube = \
             intersect_camera_rays_with_unit_cube(
                 pixels, cameras,
                 use_ray_length_as_depth=False)
         d_cube = d_cube_intersection[mask_cube]
-        # d_freespace is the depth between the two intersection with the unit cube
         d_freespace[mask_cube] = d_cube[:, 0] + \
             torch.rand(d_cube.shape[0]).to(
                 device) * (d_cube[:, 1] - d_cube[:, 0])
@@ -892,7 +896,7 @@ def get_input_pc(data_dict):
     if depth_img.shape[-1] > 0:
         # pixel (B,N,2)
         pixels = arange_pixels((h, w), batch_size)[1].to(img.device)
-        assert(pixels.shape[1] == h*w)
+        assert(pixels.shape[1] == h * w)
         # if annotated mask exists, use this mask to remove outlier points
         mask_gt = get_tensor_values(
             mask_img, pixels, squeeze_channel_dim=True).bool()
@@ -916,63 +920,3 @@ def get_input_pc(data_dict):
         sparse_points = None
 
     return dense_points, sparse_points
-
-
-def save_ply(points, filename, colors=None, normals=None, binary=True):
-    """
-    save 3D/2D points to ply file
-    Args:
-        points (numpy array): (N,2or3)
-        colors (numpy uint8 array): (N, 3or4)
-    """
-    assert(points.ndim == 2)
-    if points.shape[-1] == 2:
-        points = np.concatenate(
-            [points, np.zeros_like(points)[:, :1]], axis=-1)
-
-    vertex = np.core.records.fromarrays(points.transpose(
-        1, 0), names='x, y, z', formats='f4, f4, f4')
-    num_vertex = len(vertex)
-    desc = vertex.dtype.descr
-
-    if normals is not None:
-        assert(normals.ndim == 2)
-        if normals.shape[-1] == 2:
-            normals = np.concatenate(
-                [normals, np.zeros_like(normals)[:, :1]], axis=-1)
-        vertex_normal = np.core.records.fromarrays(
-            normals.transpose(1, 0), names='nx, ny, nz', formats='f4, f4, f4')
-        assert len(vertex_normal) == num_vertex
-        desc = desc + vertex_normal.dtype.descr
-
-    if colors is not None:
-        assert len(colors) == num_vertex
-        if colors.max() <= 1:
-            colors = colors * 255
-        if colors.shape[1] == 4:
-            vertex_color = np.core.records.fromarrays(colors.transpose(
-                1, 0), names='red, green, blue, alpha', formats='u1, u1, u1, u1')
-        else:
-            vertex_color = np.core.records.fromarrays(colors.transpose(
-                1, 0), names='red, green, blue', formats='u1, u1, u1')
-        desc = desc + vertex_color.dtype.descr
-
-    vertex_all = np.empty(num_vertex, dtype=desc)
-
-    for prop in vertex.dtype.names:
-        vertex_all[prop] = vertex[prop]
-
-    if normals is not None:
-        for prop in vertex_normal.dtype.names:
-            vertex_all[prop] = vertex_normal[prop]
-
-    if colors is not None:
-        for prop in vertex_color.dtype.names:
-            vertex_all[prop] = vertex_color[prop]
-
-    ply = plyfile.PlyData(
-        [plyfile.PlyElement.describe(vertex_all, 'vertex')], text=(not binary))
-    if not os.path.exists(os.path.dirname(filename)):
-        os.makedirs(os.path.dirname(filename))
-
-    ply.write(filename)

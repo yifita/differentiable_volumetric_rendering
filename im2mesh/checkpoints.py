@@ -105,7 +105,15 @@ class CheckpointIO(object):
 
         for k, v in self.module_dict.items():
             if k in state_dict:
-                v.load_state_dict(state_dict[k])
+                if isinstance(v, torch.optim.Optimizer):
+                    v.load_state_dict(state_dict[k])
+                else:
+                    missing_keys, unexpected_keys = v.load_state_dict(state_dict[k], strict=False)
+                if len(missing_keys) > 0:
+                    print('Warning: Could not find %s in checkpoint!' % missing_keys)
+                if len(unexpected_keys) > 0:
+                    print('Warning: Found unexpectedly %s in checkpoint!' % unexpected_keys)
+
             else:
                 print('Warning: Could not find %s in checkpoint!' % k)
         scalars = {k: v for k, v in state_dict.items()
