@@ -450,7 +450,7 @@ def transform_to_world(pixels, depth, cameras):
 
     # NOTE: negate pixels because pytorch3d NDC have x and y directions inversed
     xy_depth = torch.cat([-pixels, depth], dim=-1)
-    p_world = cameras.unproject_points(xy_depth)
+    p_world = cameras.unproject_points(xy_depth, eps=1e-8)
     check_tensor(p_world, 'p_world')
     if is_numpy:
         p_world = p_world.numpy()
@@ -740,7 +740,7 @@ def make_3d_grid(bb_min, bb_max, shape):
 def get_occupancy_loss_points(pixels, cameras,
                               depth_image=None, use_cube_intersection=True,
                               occupancy_random_normal=False,
-                              depth_range=[0, 2.4]):
+                              depth_range=[1.0, 2.4]):
     ''' Returns 3D points for occupancy loss.
     Penalize pixels that lie inside the object mask but the predicted surface depth is inifite.
     Use randomly sampled depth value, or in case the depth_image is give, use the ground truth
@@ -810,7 +810,7 @@ def get_freespace_loss_points(pixels, cameras,
 
     # sample between the depth range. avoid 0 depth
     d_freespace = torch.rand(batch_size, n_points).to(device) * \
-        (depth_range[0] - depth_range[1]) + depth_range[0]
+        (depth_range[1] - depth_range[0]) + depth_range[0]
 
     if use_cube_intersection:
         # d_freespace is a random depth between the two intersections with the unit cube

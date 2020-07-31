@@ -174,7 +174,7 @@ class DepthFunction(torch.autograd.Function):
             with torch.no_grad():
                 f_mid = decoder(p_mid, c, batchwise=False,
                                 only_occupancy=True) - logit_tau
-                f_mid.squeeze_(-1)
+                f_mid = f_mid.squeeze(-1)
             # ind_low masks f_mid has the same sign as d_low
             # if decoder outputs sdf, d_low (start) is > 0,
             ind_low = compare_func(f_mid)
@@ -192,7 +192,7 @@ class DepthFunction(torch.autograd.Function):
     def perform_ray_marching(ray0, ray_direction, decoder, compare_func,
                              c=None,
                              tau=0.5, n_steps=[128, 129], n_secant_steps=8,
-                             depth_range=[0., 2.4], method='secant',
+                             depth_range=[0.0, 2.4], method='secant',
                              check_cube_intersection=True, max_points=50000):
         ''' Performs ray marching to detect surface points.
 
@@ -379,7 +379,7 @@ class DepthFunction(torch.autograd.Function):
 
         with torch.enable_grad():
             p_pred.requires_grad = True
-            f_p = decoder(p_pred, c, only_occupancy=True)
+            f_p = decoder(p_pred, c, only_occupancy=True).squeeze(-1)
             f_p_sum = f_p.sum()
             grad_p = torch.autograd.grad(f_p_sum, p_pred, retain_graph=True)[0]
             grad_p_dot_v = (grad_p * ray_direction).sum(-1)
