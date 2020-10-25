@@ -29,7 +29,7 @@ def sample_patch_points(batch_size, n_points, patch_size=1,
         patch_size (int): size of patch; if > 1, patches of size patch_size
             are sampled instead of individual points
         image_resolution (tuple): image resolution (required for calculating
-            the pixel distances)
+            the pixel distances) (H, W)
         continuous (bool): whether to sample continuously or only on pixel
             locations
     '''
@@ -496,14 +496,9 @@ def image_points_to_world(image_points, cameras):
     batch_size, n_pts, dim = image_points.shape
     assert(dim == 2)
     device = image_points.device
-    image_plane_z = torch.tensor((1, ), device=device)
-    try:
-        image_plane_z = cameras.znear
-    except AttributeError as e:
-        image_plane_z = cameras.focal_length
-    except Exception:
-        logger_py.error('Couldn\'t figure out the image plane from the cameras instance. ' +
-                        'Make sure you are using pytorch3d cameras')
+    image_plane_z = getattr(cameras,'znear', torch.tensor((1, ), device=device))
+    if not isinstance(image_plane_z, torch.Tensor):
+        image_plane_z = torch.tensor(image_plane_z, device=device, dtype=torch.float)
 
     image_plane_z = image_plane_z.view(-1, 1, 1).expand(batch_size, n_pts, 1)
     return transform_to_world(image_points, image_plane_z, cameras)

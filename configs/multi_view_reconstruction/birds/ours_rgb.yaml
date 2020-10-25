@@ -20,6 +20,10 @@ model:
   depth_function_kwargs: {
     max_points: 100000
   }
+  decoder_kwargs:
+    hidden_size: 256
+    n_layers: 3
+    out_dim: 4
 training:
   out_dir:  out/multi_view_reconstruction/birds/ours_rgb
   n_training_points: 2048

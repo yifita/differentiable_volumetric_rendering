@@ -81,7 +81,7 @@ class MeshEvaluator(object):
             normals_tgt (numpy array): target normals
             thresholds (numpy array): threshold values for
                 the F-score calculation
-        ''' 
+        '''
         # Return maximum losses if pointcloud is empty
         if pointcloud.shape[0] == 0:
             logger.warn('Empty pointcloud / mesh detected!')
@@ -142,7 +142,7 @@ class MeshEvaluator(object):
             'chamfer': chamfer,
             'chamferL1': chamferL1,
         }
-        
+
         # Add F scores for percentages
         for threshold, precision_i, recall_i, F_i in zip(thresholds, precision,
                                                          recall, F):

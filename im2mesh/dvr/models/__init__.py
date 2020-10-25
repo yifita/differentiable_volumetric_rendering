@@ -164,9 +164,9 @@ class DVR(nn.Module):
 
         # Get approximate derivate as f(x + h/2) - f(x - h/2)
         df_dx = torch.stack([
-            (f[:, 0] - f[:, 1]),
-            (f[:, 2] - f[:, 3]),
-            (f[:, 4] - f[:, 5]),
+            (f[:, 0] - f[:, 1])/h,
+            (f[:, 2] - f[:, 3])/h,
+            (f[:, 4] - f[:, 5])/h,
         ], dim=-1)
         return df_dx
 

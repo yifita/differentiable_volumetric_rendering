@@ -13,6 +13,7 @@ def apply_reduction(tensor, reduction_method='sum'):
         return tensor.sum()
     elif reduction_method == 'mean':
         return tensor.mean()
+    return tensor
 
 
 def l1_loss(val_gt, val_pred, reduction_method='sum', eps=0., sigma_pow=1,
